@@ -424,8 +424,12 @@ def test_register_verifies_spec_added_by_historic_replay(pm: PluginManager) -> N
         def late(self, qlwkje):
             pass  # pragma: no cover
 
+    plugin = hello()
     with pytest.raises(PluginValidationError, match="qlwkje"):
-        pm.register(hello())
+        pm.register(plugin)
+    assert not pm.is_registered(plugin)
+    assert pm.hook.configure.get_hookimpls() == []
+    assert pm.hook.late.get_hookimpls() == []
 
 
 def test_register_hookwrapper_not_a_generator_function(he_pm: PluginManager) -> None:
@@ -538,6 +542,96 @@ def test_register_historic(pm: PluginManager) -> None:
     assert out == [1, 10]
     pm.hook.he_method1.call_historic(kwargs={"arg": 12})
     assert out == [1, 10, 120, 12]
+
+
+@pytest.mark.parametrize("exception_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("fail_in_callback", [False, True])
+def test_register_historic_failure_rolls_back(
+    pm: PluginManager, exception_type, fail_in_callback: bool
+) -> None:
+    class Hooks:
+        @hookspec
+        def action(self): ...
+
+        @hookspec(historic=True)
+        def configure(self): ...
+
+    class Existing:
+        @hookimpl
+        def action(self):
+            return "existing"
+
+    error = exception_type("historic replay failed")
+    fail = True
+
+    class Plugin:
+        @hookimpl
+        def action(self):
+            return "candidate"
+
+        @hookimpl
+        def configure(self):
+            if fail and not fail_in_callback:
+                raise error
+            return "configured"
+
+    def callback(result):
+        if fail and fail_in_callback:
+            raise error
+        assert result == "configured"
+
+    pm.add_hookspecs(Hooks)
+    existing = Existing()
+    pm.register(existing, "existing")
+    pm.hook.configure.call_historic(callback)
+    plugin = Plugin()
+
+    with pytest.raises(exception_type) as excinfo:
+        pm.register(plugin, "candidate")
+    assert excinfo.value is error
+    assert pm.list_name_plugin() == [("existing", existing)]
+    assert pm.get_hookcallers(plugin) is None
+    assert pm.hook.action() == ["existing"]
+    assert pm.hook.configure.get_hookimpls() == []
+
+    fail = False
+    assert pm.register(plugin, "candidate") == "candidate"
+    assert pm.hook.action() == ["candidate", "existing"]
+    assert len(pm.hook.configure.get_hookimpls()) == 1
+
+
+def test_register_historic_failure_preserves_replacement(pm: PluginManager) -> None:
+    class Hooks:
+        @hookspec
+        def action(self): ...
+
+        @hookspec(historic=True)
+        def configure(self): ...
+
+    class Replacement:
+        @hookimpl
+        def action(self):
+            return "replacement"
+
+    replacement = Replacement()
+
+    class Plugin:
+        @hookimpl
+        def action(self):
+            return "candidate"
+
+        @hookimpl
+        def configure(self):
+            pm.unregister(name="candidate")
+            pm.register(replacement, "candidate")
+            raise RuntimeError("historic replay failed")
+
+    pm.add_hookspecs(Hooks)
+    pm.hook.configure.call_historic()
+    with pytest.raises(RuntimeError, match="historic replay failed"):
+        pm.register(Plugin(), "candidate")
+    assert pm.get_plugin("candidate") is replacement
+    assert pm.hook.action() == ["replacement"]
 
 
 def test_historic_with_subset_hook_caller(pm: PluginManager) -> None:

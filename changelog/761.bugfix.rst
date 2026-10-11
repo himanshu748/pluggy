@@ -1,0 +1,1 @@
+Unregister a plugin and its hook implementations when historic call replay fails during registration, allowing registration to be retried.
